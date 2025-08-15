@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 
 import '../services/order_service.dart';
+import '../services/notification_center.dart';
 import '../models/menu_item.dart';
 // *** YENİ: Yerelleştirme yardımcısı import edildi ***
 import '../../utils/localization_helper.dart';
@@ -50,6 +51,10 @@ class _TableCellWidgetState extends State<TableCellWidget> {
   int _elapsedSeconds = 0;
   bool _isProcessingAction = false;
 
+  // 🔥 YENİ: NotificationCenter callback'leri
+  late Function(Map<String, dynamic>) _kdsUpdateCallback;
+  late Function(Map<String, dynamic>) _screenActiveCallback;
+
   // Bu sabitler aynı kalıyor
   static const String STATUS_PENDING_APPROVAL = 'pending_approval';
   static const String STATUS_PENDING_SYNC = 'pending_sync';
@@ -66,10 +71,21 @@ class _TableCellWidgetState extends State<TableCellWidget> {
   static const String KDS_ITEM_STATUS_READY = 'ready_kds';
   static const String KDS_ITEM_STATUS_PICKED_UP = 'picked_up_kds';
 
+  // 🔥 YENİ: KDS event'leri
+  static const Set<String> _kdsEvents = {
+    'order_preparing_update',
+    'order_ready_for_pickup_update',
+    'order_item_picked_up',
+    'order_fully_delivered',
+  };
+
   @override
   void initState() {
     super.initState();
     _startTimerIfNeeded();
+    
+    // 🔥 YENİ: NotificationCenter listener'ları setup
+    _setupNotificationListeners();
   }
 
   @override
@@ -84,7 +100,153 @@ class _TableCellWidgetState extends State<TableCellWidget> {
   @override
   void dispose() {
     _timer?.cancel();
+    
+    // 🔥 YENİ: NotificationCenter listener'ları temizle
+    _cleanupNotificationListeners();
+    
     super.dispose();
+  }
+
+  // 🔥 YENİ: NotificationCenter listener'ları kurulum
+  void _setupNotificationListeners() {
+    _kdsUpdateCallback = (data) {
+      if (!mounted) return;
+      
+      final eventType = data['event_type'] as String?;
+      final orderId = data['order_id'];
+      
+      // Bu widget'ın sipariş ID'si ile eşleşip eşleşmediğini kontrol et
+      if (widget.pendingOrder != null && 
+          orderId != null && 
+          (widget.pendingOrder['id'] == orderId || 
+           widget.pendingOrder['temp_id'] == orderId.toString())) {
+        
+        debugPrint('[TableCellWidget] 🔥 KDS priority update for order #$orderId: $eventType');
+        
+        // KDS güncellemesi için anında refresh tetikle
+        widget.onOrderUpdated();
+        
+        // Görsel feedback için kısa animasyon
+        _showKdsUpdateFeedback(eventType);
+      }
+    };
+
+    _screenActiveCallback = (data) {
+      if (!mounted) return;
+      
+      debugPrint('[TableCellWidget] 📱 Screen became active notification received');
+      // Ekran aktif olduğunda timer'ı yeniden başlat
+      _startTimerIfNeeded();
+    };
+
+    // Listener'ları kaydet
+    NotificationCenter.instance.addObserver('kds_priority_update', _kdsUpdateCallback);
+    NotificationCenter.instance.addObserver('screen_became_active', _screenActiveCallback);
+    
+    debugPrint('[TableCellWidget] 🎯 KDS listeners registered for table ${widget.table['table_number']}');
+  }
+
+  // 🔥 YENİ: NotificationCenter listener'ları temizleme
+  void _cleanupNotificationListeners() {
+    NotificationCenter.instance.removeObserver('kds_priority_update', _kdsUpdateCallback);
+    NotificationCenter.instance.removeObserver('screen_became_active', _screenActiveCallback);
+    
+    debugPrint('[TableCellWidget] 🗑️ KDS listeners cleaned up for table ${widget.table['table_number']}');
+  }
+
+  // 🔥 YENİ: KDS güncellemesi için görsel feedback
+  void _showKdsUpdateFeedback(String? eventType) {
+    if (!mounted || eventType == null) return;
+    
+    Color feedbackColor;
+    IconData feedbackIcon;
+    String feedbackMessage;
+    
+    switch (eventType) {
+      case 'order_preparing_update':
+        feedbackColor = Colors.orange;
+        feedbackIcon = Icons.whatshot;
+        feedbackMessage = '🔥 Hazırlanıyor';
+        break;
+      case 'order_ready_for_pickup_update':
+        feedbackColor = Colors.teal;
+        feedbackIcon = Icons.restaurant_menu;
+        feedbackMessage = '✅ Hazır';
+        break;
+      case 'order_item_picked_up':
+        feedbackColor = Colors.purple;
+        feedbackIcon = Icons.pan_tool_alt;
+        feedbackMessage = '👐 Alındı';
+        break;
+      case 'order_fully_delivered':
+        feedbackColor = Colors.green;
+        feedbackIcon = Icons.check_circle;
+        feedbackMessage = '🎉 Teslim';
+        break;
+      default:
+        return; // Bilinmeyen event tipi için feedback yok
+    }
+
+    // Snackbar yerine daha subtle overlay feedback
+    if (mounted) {
+      _showOverlayFeedback(feedbackColor, feedbackIcon, feedbackMessage);
+    }
+  }
+
+  // 🔥 YENİ: Overlay feedback gösterimi
+  void _showOverlayFeedback(Color color, IconData icon, String message) {
+    final overlay = Overlay.of(context);
+    late OverlayEntry overlayEntry;
+    
+    overlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        top: MediaQuery.of(context).size.height * 0.1,
+        right: 20,
+        child: Material(
+          color: Colors.transparent,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutBack,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.9),
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black26,
+                  blurRadius: 8,
+                  offset: Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  message,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    
+    overlay.insert(overlayEntry);
+    
+    // 2 saniye sonra kaldır
+    Timer(const Duration(seconds: 2), () {
+      if (overlayEntry.mounted) {
+        overlayEntry.remove();
+      }
+    });
   }
 
   // Bu metotlarda bir değişiklik yok, aynı kalıyorlar
@@ -146,13 +308,19 @@ class _TableCellWidgetState extends State<TableCellWidget> {
         SnackBar(content: Text(message), backgroundColor: Colors.redAccent));
   }
 
+  // 🔥 GÜNCELLENEN: KDS feedback ile enhanced
   Future<void> _handleItemPickup(int orderItemId, AppLocalizations l10n) async {
     if (!mounted || _isProcessingAction) return;
     setState(() => _isProcessingAction = true);
+    
+    // Optimistic UI update feedback
+    _showOverlayFeedback(Colors.purple, Icons.pan_tool_alt, '👐 İşleniyor...');
+    
     try {
       final response = await OrderService.markItemPickedUpByWaiter(token: widget.token, orderItemId: orderItemId);
       if (mounted) {
         if (response.statusCode == 200) {
+          debugPrint('[TableCellWidget] 🎯 Item pickup successful, triggering update');
           widget.onOrderUpdated();
         } else {
           _showErrorSnackbar(l10n.tableCellItemPickupErrorWithDetails(response.statusCode.toString(), utf8.decode(response.bodyBytes)));
@@ -165,14 +333,20 @@ class _TableCellWidgetState extends State<TableCellWidget> {
     }
   }
 
+  // 🔥 GÜNCELLENEN: KDS feedback ile enhanced
   Future<void> _handleDeliverOrderItem(int orderItemId, AppLocalizations l10n) async {
     if (!mounted || _isProcessingAction) return;
     setState(() => _isProcessingAction = true);
+    
+    // Optimistic UI update feedback
+    _showOverlayFeedback(Colors.green, Icons.check_circle, '🎉 Teslim ediliyor...');
+    
     try {
       final response = await OrderService.markOrderItemDelivered(
           token: widget.token, orderId: widget.pendingOrder['id'], orderItemId: orderItemId);
       if (mounted) {
         if (response.statusCode == 200) {
+          debugPrint('[TableCellWidget] 🎯 Item delivery successful, triggering update');
           widget.onOrderUpdated();
         } else {
           _showErrorSnackbar(l10n.tableCellDeliverErrorWithStatus(response.statusCode.toString()));
@@ -214,13 +388,22 @@ class _TableCellWidgetState extends State<TableCellWidget> {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Expanded(
-          child: Text(
-            "#${widget.pendingOrder?['temp_id']?.substring(0, 5) ?? widget.pendingOrder?['id'] ?? widget.table['table_number']} - $statusText",
-            style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: statusColor,
-                overflow: TextOverflow.ellipsis),
+          child: Row(
+            children: [
+              // 🔥 YENİ: KDS status indicator
+              if (widget.isOccupied && widget.pendingOrder != null)
+                _buildKdsStatusIndicator(),
+              Expanded(
+                child: Text(
+                  "#${widget.pendingOrder?['temp_id']?.toString().substring(0, 5) ?? widget.pendingOrder?['id'] ?? widget.table['table_number']} - $statusText",
+                  style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: statusColor,
+                      overflow: TextOverflow.ellipsis),
+                ),
+              ),
+            ],
           ),
         ),
         Text(
@@ -234,7 +417,82 @@ class _TableCellWidgetState extends State<TableCellWidget> {
     );
   }
 
-  // Bu metot ve altındaki build metodu aynı kalıyor, değişiklik yok.
+  // 🔥 YENİ: KDS durumu göstergesi
+  Widget _buildKdsStatusIndicator() {
+    if (widget.pendingOrder == null) return const SizedBox.shrink();
+    
+    final orderItems = widget.pendingOrder['order_items'] as List?;
+    if (orderItems == null || orderItems.isEmpty) return const SizedBox.shrink();
+    
+    // KDS item durumlarını analiz et
+    bool hasPreparingItems = false;
+    bool hasReadyItems = false;
+    bool hasPickedUpItems = false;
+    
+    for (final item in orderItems) {
+      final kdsStatus = item['kds_status'] as String?;
+      switch (kdsStatus) {
+        case KDS_ITEM_STATUS_PREPARING:
+          hasPreparingItems = true;
+          break;
+        case KDS_ITEM_STATUS_READY:
+          hasReadyItems = true;
+          break;
+        case KDS_ITEM_STATUS_PICKED_UP:
+          hasPickedUpItems = true;
+          break;
+      }
+    }
+    
+    // Öncelik sırasına göre indicator göster
+    if (hasReadyItems) {
+      return Container(
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: Colors.teal.shade600,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Icon(
+          Icons.restaurant_menu,
+          color: Colors.white,
+          size: 16,
+        ),
+      );
+    } else if (hasPreparingItems) {
+      return Container(
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: Colors.orange.shade600,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Icon(
+          Icons.whatshot,
+          color: Colors.white,
+          size: 16,
+        ),
+      );
+    } else if (hasPickedUpItems) {
+      return Container(
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: Colors.purple.shade600,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Icon(
+          Icons.pan_tool_alt,
+          color: Colors.white,
+          size: 16,
+        ),
+      );
+    }
+    
+    return const SizedBox.shrink();
+  }
+
+  // 🔥 GÜNCELLENEN: Enhanced KDS status display
   Widget _buildItemRow(Map<String, dynamic> item, AppLocalizations l10n) {
     final bool isDelivered = item['delivered'] == true;
     final String kdsStatus = item['kds_status'] ?? KDS_ITEM_STATUS_PENDING;
@@ -247,15 +505,33 @@ class _TableCellWidgetState extends State<TableCellWidget> {
         child: Icon(Icons.check_circle, size: 28, color: Colors.green.shade600),
       );
     } else if (kdsStatus == KDS_ITEM_STATUS_READY) {
-      actionWidget = IconButton(icon: const Icon(Icons.pan_tool_alt_outlined, size: 28), color: Colors.purple.shade600, padding: EdgeInsets.zero, constraints: const BoxConstraints(), tooltip: l10n.tableCellTooltipMarkAsPickedUpByWaiter, onPressed: _isProcessingAction ? null : () => _handleItemPickup(item['id'], l10n),
+      actionWidget = IconButton(
+        icon: const Icon(Icons.pan_tool_alt_outlined, size: 28), 
+        color: Colors.purple.shade600, 
+        padding: EdgeInsets.zero, 
+        constraints: const BoxConstraints(), 
+        tooltip: l10n.tableCellTooltipMarkAsPickedUpByWaiter, 
+        onPressed: _isProcessingAction ? null : () => _handleItemPickup(item['id'], l10n),
       );
     } else if (kdsStatus == KDS_ITEM_STATUS_PICKED_UP) {
-      actionWidget = IconButton(icon: const Icon(Icons.room_service_outlined, size: 28), color: Colors.blue.shade600, padding: EdgeInsets.zero, constraints: const BoxConstraints(), tooltip: l10n.tableCellTooltipDeliverToCustomer, onPressed: _isProcessingAction ? null : () => _handleDeliverOrderItem(item['id'], l10n),
+      actionWidget = IconButton(
+        icon: const Icon(Icons.room_service_outlined, size: 28), 
+        color: Colors.blue.shade600, 
+        padding: EdgeInsets.zero, 
+        constraints: const BoxConstraints(), 
+        tooltip: l10n.tableCellTooltipDeliverToCustomer, 
+        onPressed: _isProcessingAction ? null : () => _handleDeliverOrderItem(item['id'], l10n),
       );
     } else if (kdsStatus == KDS_ITEM_STATUS_PREPARING) {
-      actionWidget = Tooltip(message: l10n.kdsStatusPreparing, child: Icon(Icons.whatshot, size: 24, color: Colors.orange.shade800));
+      actionWidget = Tooltip(
+        message: l10n.kdsStatusPreparing, 
+        child: Icon(Icons.whatshot, size: 24, color: Colors.orange.shade800)
+      );
     } else { // pending_kds
-      actionWidget = Tooltip(message: l10n.tableCellTooltipWaitingForKitchen, child: Icon(Icons.hourglass_empty, size: 22, color: Colors.grey.shade600));
+      actionWidget = Tooltip(
+        message: l10n.tableCellTooltipWaitingForKitchen, 
+        child: Icon(Icons.hourglass_empty, size: 22, color: Colors.grey.shade600)
+      );
     }
 
     final String productName = item['menu_item']?['name'] ?? l10n.unknownProduct;

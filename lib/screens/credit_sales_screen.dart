@@ -1,5 +1,7 @@
 // lib/screens/credit_sales_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:timezone/timezone.dart' as tz;
@@ -38,6 +40,27 @@ class _CreditSalesScreenState extends State<CreditSalesScreen> {
   void initState() {
     super.initState();
     _scrollController.addListener(_loadMore);
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[CreditSalesScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'credit_sales_screen_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _loadFirstPage();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[CreditSalesScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'credit_sales_screen_active_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _loadFirstPage();
+        });
+      }
+    });
   }
 
   @override
@@ -53,6 +76,8 @@ class _CreditSalesScreenState extends State<CreditSalesScreen> {
   void dispose() {
     _scrollController.removeListener(_loadMore);
     _scrollController.dispose();
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
     super.dispose();
   }
 

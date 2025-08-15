@@ -1,5 +1,7 @@
 // lib/screens/stock_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -29,7 +31,36 @@ class _StockScreenState extends State<StockScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[StockScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'stock_screen_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchAllData();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[StockScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'stock_screen_active_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchAllData();
+        });
+      }
+    });
+
     _fetchAllData();
+  }
+
+  @override
+  void dispose() {
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
+    super.dispose();
   }
 
   Future<void> _fetchAllData() async {

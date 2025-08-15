@@ -1,5 +1,7 @@
 // lib/screens/manage_variant_list_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -30,7 +32,36 @@ class _ManageVariantListScreenState extends State<ManageVariantListScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[ManageVariantListScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'manage_variant_list_screen_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await fetchMenuItems();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[ManageVariantListScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'manage_variant_list_screen_active_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await fetchMenuItems();
+        });
+      }
+    });
+
     // initState içinde fetchMenuItems çağrısı kaldırıldı.
+  }
+
+  @override
+  void dispose() {
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
+    super.dispose();
   }
 
   @override

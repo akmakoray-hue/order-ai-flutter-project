@@ -1,12 +1,14 @@
 // lib/screens/business_owner_home.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:makarna_app/services/stock_service.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
-import 'package:collection/collection.dart'; // listEquals için
+import 'package:collection/collection.dart';
 
 // Servisler
 import '../services/user_session.dart';
@@ -15,6 +17,8 @@ import '../services/order_service.dart';
 import '../services/kds_service.dart';
 import '../services/kds_management_service.dart';
 import '../services/connectivity_service.dart';
+import '../services/global_notification_handler.dart' as globalHandler;
+import '../services/connection_manager.dart';
 
 // Modeller
 import '../models/kds_screen_model.dart';
@@ -50,10 +54,16 @@ class BusinessOwnerHome extends StatefulWidget {
     _BusinessOwnerHomeState createState() => _BusinessOwnerHomeState();
 }
 
+// 🔥 3. ADIM - Event Throttling & Performance Optimization
 class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
-    with RouteAware {
+    with RouteAware, WidgetsBindingObserver {
+    
     int _currentIndex = 0;
     bool _isInitialLoadComplete = false;
+    
+    // Screen state tracking
+    bool _isCurrent = true;
+    bool _isAppInForeground = true;
 
     List<Widget> _activeTabPages = [];
     List<BottomNavigationBarItem> _activeNavBarItems = [];
@@ -66,6 +76,7 @@ class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
     final ValueNotifier<int> _activeKdsOrderCountNotifier = ValueNotifier(0);
 
     Timer? _orderCountRefreshTimer;
+    DateTime? _lastRefreshTime;
 
     List<KdsScreenModel> _availableKdsScreensForUser = [];
     bool _isLoadingKdsScreens = true;
@@ -73,14 +84,25 @@ class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
     
     bool _hasStockAlerts = false;
 
+    // 🔥 YENİ: Event throttling ve deduplication
+    static final Map<String, Timer> _eventThrottlers = {};
+    static final Set<String> _processingEvents = {};
+    static Timer? _batchEventTimer;
+    static final Set<String> _pendingEventTypes = {};
+
+    // NotificationCenter callbacks
+    late Function(Map<String, dynamic>) _refreshAllScreensCallback;
+    late Function(Map<String, dynamic>) _screenBecameActiveCallback;
+    late Function(Map<String, dynamic>) _kdsUpdateCallback;
+
     @override
     void initState() {
         super.initState();
         debugPrint("[${DateTime.now()}] _BusinessOwnerHomeState: initState. User: ${UserSession.username}, Type: ${UserSession.userType}");
         
-        // --- İYİLEŞTİRME 1: Async işlemler build sonrası başlıyor ---
-        // Bu, initState'in anında tamamlanmasını sağlar ve widget ağacı hazır olmadan
-        // context gerektiren işlemlerin başlamasını engeller.
+        WidgetsBinding.instance.addObserver(this);
+        _setupNotificationCenterListeners();
+        
         WidgetsBinding.instance.addPostFrameCallback((_) {
             _initializeAsyncDependencies();
         });
@@ -91,16 +113,457 @@ class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
     @override
     void dispose() {
         debugPrint("[${DateTime.now()}] _BusinessOwnerHomeState: dispose.");
+        
         routeObserver.unsubscribe(this);
+        WidgetsBinding.instance.removeObserver(this);
+        
+        _cleanupNotificationCenterListeners();
         _removeSocketServiceAndNotifierListeners();
         _orderCountRefreshTimer?.cancel();
+        
+        // 🔥 Event throttler cleanup
+        _eventThrottlers.values.forEach((timer) => timer.cancel());
+        _eventThrottlers.clear();
+        _batchEventTimer?.cancel();
+        _processingEvents.clear();
+        _pendingEventTypes.clear();
+        
         _activeTableOrderCountNotifier.dispose();
         _activeTakeawayOrderCountNotifier.dispose();
         _activeKdsOrderCountNotifier.dispose();
         
-        // SocketService.instance.dispose() çağrılmaz, çünkü uygulama boyunca yaşamalıdır.
-        
         super.dispose();
+    }
+
+    // 🔥 GELİŞTİRİLMİŞ: Event throttling ve batching
+    void _setupNotificationCenterListeners() {
+        _refreshAllScreensCallback = (data) {
+            if (!mounted || !_shouldProcessUpdate()) return;
+            
+            final eventType = data['eventType'] as String?;
+            final eventData = data['data'] as Map<String, dynamic>?;
+            
+            // 🔥 Batched refresh handling
+            if (data['batchRefresh'] == true) {
+                final eventTypes = data['eventTypes'] as List<String>? ?? [];
+                debugPrint("[BusinessOwnerHome] 📡 Batch refresh received: ${eventTypes.join(', ')}");
+                
+                bool shouldRefresh = eventTypes.any((type) => _shouldRefreshForEvent(type));
+                if (shouldRefresh) {
+                    _throttledEventProcessor('batch_refresh', () async {
+                        await _fetchActiveOrderCounts();
+                        await _checkStockAlerts();
+                    });
+                }
+                return;
+            }
+            
+            debugPrint("[BusinessOwnerHome] 📡 Global refresh received: $eventType");
+            
+            if (_shouldRefreshForEvent(eventType)) {
+                _throttledEventProcessor('global_refresh_$eventType', () async {
+                    await _fetchActiveOrderCounts();
+                    await _checkStockAlerts();
+                });
+            }
+        };
+
+        _screenBecameActiveCallback = (data) {
+            if (!mounted || !_shouldProcessUpdate()) return;
+            
+            debugPrint("[BusinessOwnerHome] 📱 Screen became active notification received");
+            _throttledEventProcessor('screen_active', () async {
+                await _fetchActiveOrderCounts();
+                await _checkStockAlerts();
+            });
+        };
+
+        _kdsUpdateCallback = (data) {
+            if (!mounted || !_shouldProcessUpdate()) return;
+            
+            final eventType = data['event_type'] as String?;
+            debugPrint("[BusinessOwnerHome] 🔥 KDS update detected: $eventType");
+            
+            if (_isKdsEvent(eventType)) {
+                // 🔥 KDS events get immediate processing (no throttling for critical events)
+                _immediateEventProcessor('kds_update_$eventType', () async {
+                    await _fetchActiveOrderCounts();
+                    await _checkStockAlerts();
+                });
+            }
+        };
+
+        NotificationCenter.instance.addObserver('refresh_all_screens', _refreshAllScreensCallback);
+        NotificationCenter.instance.addObserver('screen_became_active', _screenBecameActiveCallback);
+        NotificationCenter.instance.addObserver('order_status_update', _kdsUpdateCallback);
+    }
+
+    // 🔥 YENİ: Throttled event processor - Normal events için
+    void _throttledEventProcessor(String eventKey, Future<void> Function() processor) {
+        // Duplicate event check
+        if (_processingEvents.contains(eventKey)) {
+            debugPrint("[BusinessOwnerHome] 🚫 Event $eventKey already processing, skipping...");
+            return;
+        }
+
+        // Cancel existing throttler for this event
+        _eventThrottlers[eventKey]?.cancel();
+        
+        // Set new throttled timer - 800ms delay
+        _eventThrottlers[eventKey] = Timer(Duration(milliseconds: 800), () async {
+            if (!mounted || !_shouldProcessUpdate()) return;
+            
+            _processingEvents.add(eventKey);
+            debugPrint("[BusinessOwnerHome] 🟡 Processing throttled event: $eventKey");
+            
+            try {
+                await processor();
+                debugPrint("[BusinessOwnerHome] ✅ Completed throttled event: $eventKey");
+            } catch (e) {
+                debugPrint("[BusinessOwnerHome] ❌ Error in throttled event $eventKey: $e");
+            } finally {
+                _processingEvents.remove(eventKey);
+                _eventThrottlers.remove(eventKey);
+            }
+        });
+        
+        debugPrint("[BusinessOwnerHome] ⏱️ Throttled event scheduled: $eventKey");
+    }
+
+    // 🔥 YENİ: Immediate event processor - KDS critical events için
+    void _immediateEventProcessor(String eventKey, Future<void> Function() processor) {
+        // Duplicate event check
+        if (_processingEvents.contains(eventKey)) {
+            debugPrint("[BusinessOwnerHome] 🚫 Critical event $eventKey already processing, skipping...");
+            return;
+        }
+
+        _processingEvents.add(eventKey);
+        debugPrint("[BusinessOwnerHome] 🔥 Processing immediate event: $eventKey");
+        
+        // Execute immediately
+        processor().then((_) {
+            debugPrint("[BusinessOwnerHome] ✅ Completed immediate event: $eventKey");
+        }).catchError((e) {
+            debugPrint("[BusinessOwnerHome] ❌ Error in immediate event $eventKey: $e");
+        }).whenComplete(() {
+            _processingEvents.remove(eventKey);
+        });
+    }
+
+    void _cleanupNotificationCenterListeners() {
+        NotificationCenter.instance.removeObserver('refresh_all_screens', _refreshAllScreensCallback);
+        NotificationCenter.instance.removeObserver('screen_became_active', _screenBecameActiveCallback);
+        NotificationCenter.instance.removeObserver('order_status_update', _kdsUpdateCallback);
+    }
+
+    bool _isKdsEvent(String? eventType) {
+        if (eventType == null) return false;
+        
+        const kdsEvents = {
+            'order_preparing_update',
+            'order_ready_for_pickup_update',
+            'order_item_picked_up',
+            'order_fully_delivered',
+        };
+        
+        return kdsEvents.contains(eventType) ||
+               eventType.contains('preparing') || 
+               eventType.contains('ready_for_pickup') ||
+               eventType.contains('picked_up');
+    }
+
+    bool _shouldRefreshForEvent(String? eventType) {
+        if (eventType == null) return false;
+        
+        const countAffectingEvents = {
+            NotificationEventTypes.guestOrderPendingApproval,
+            NotificationEventTypes.orderCancelledUpdate,
+            NotificationEventTypes.orderApprovedForKitchen,
+            NotificationEventTypes.orderPreparingUpdate,
+            NotificationEventTypes.orderReadyForPickupUpdate,
+            NotificationEventTypes.orderCompletedUpdate,
+            NotificationEventTypes.orderItemAdded,
+            NotificationEventTypes.orderItemRemoved,
+        };
+        
+        return countAffectingEvents.contains(eventType);
+    }
+
+    // Route observer methods
+    @override
+    void didChangeDependencies() {
+        super.didChangeDependencies();
+        final route = ModalRoute.of(context);
+        if (route is PageRoute) {
+            routeObserver.subscribe(this, route);
+        }
+        
+        if (ModalRoute.of(context)?.isCurrent == true && !_isInitialLoadComplete) {
+            _safeRefreshDataAsync().then((_) {
+                if (mounted) {
+                    setState(() { _isInitialLoadComplete = true; });
+                }
+            });
+        }
+    }
+
+    @override
+    void didPush() {
+        _isCurrent = true;
+        debugPrint('BusinessOwnerHome: didPush - Ana ekran aktif oldu.');
+    }
+
+    @override
+    void didPopNext() {
+        _isCurrent = true;
+        debugPrint("BusinessOwnerHome: didPopNext - Ana ekrana dönüldü, background events işleniyor.");
+        
+        SocketService.instance.onScreenBecameActive();
+        _safeRefreshDataWithThrottling();
+        _checkAndReconnectIfNeeded();
+    }
+
+    @override
+    void didPushNext() {
+        _isCurrent = false;
+        debugPrint("BusinessOwnerHome: didPushNext - Ana ekran arka plana gitti.");
+    }
+
+    @override
+    void didPop() {
+        _isCurrent = false;
+        debugPrint("BusinessOwnerHome: didPop - Ana ekran kapatıldı.");
+    }
+
+    @override
+    void didChangeAppLifecycleState(AppLifecycleState state) {
+        super.didChangeAppLifecycleState(state);
+        _isAppInForeground = state == AppLifecycleState.resumed;
+        
+        if (_isAppInForeground && _isCurrent) {
+            debugPrint('BusinessOwnerHome: App foreground\'a geldi, veriler yenileniyor.');
+            _safeRefreshDataWithThrottling();
+        }
+    }
+
+    bool _shouldProcessUpdate() {
+        return mounted && _isCurrent && _isAppInForeground;
+    }
+
+    // 🔥 UPDATED: Custom throttling implementation
+    void _safeRefreshDataWithThrottling() {
+        if (!_shouldProcessUpdate()) return;
+        
+        // 🔥 Kendi throttling implementasyonumuz
+        _throttledEventProcessor('business_owner_home_refresh', () async {
+            await _fetchActiveOrderCounts();
+            await _checkStockAlerts();
+        });
+    }
+
+    void _safeRefreshData() {
+        _safeRefreshDataWithThrottling();
+    }
+
+    Future<void> _safeRefreshDataAsync() async {
+        if (!_shouldProcessUpdate()) return;
+        
+        // Direct call for async version - no throttling on initial load
+        await _fetchActiveOrderCounts();
+        await _checkStockAlerts();
+    }
+
+    void _checkAndReconnectIfNeeded() {
+        if (!mounted) return;
+        
+        try {
+            if (!_socketService.isConnected && UserSession.token.isNotEmpty) {
+                debugPrint('[BusinessOwnerHome] Socket bağlantısı kopuk, yeniden bağlanılıyor...');
+                _socketService.connectAndListen();
+                
+                if (!ConnectionManager().isMonitoring) {
+                    ConnectionManager().startMonitoring();
+                } else {
+                    ConnectionManager().forceReconnect();
+                }
+            }
+        } catch (e) {
+            debugPrint('❌ [BusinessOwnerHome] Connection check hatası: $e');
+        }
+    }
+
+    void _addSocketServiceAndNotifierListeners() {
+        _connectivityService.isOnlineNotifier.addListener(_onConnectivityChanged);
+        _socketService.connectionStatusNotifier.addListener(_updateSocketStatusFromService);
+        
+        // 🔥 OPTIMIZED: Throttled notifier listeners
+        orderStatusUpdateNotifier.addListener(_handleSilentOrderUpdatesThrottled);
+        shouldRefreshWaitingCountNotifier.addListener(_handleWaitingCountRefreshThrottled);
+        shouldRefreshTablesNotifier.addListener(_handleTablesRefreshThrottled);
+        syncStatusMessageNotifier.addListener(_handleSyncStatusMessage);
+        stockAlertNotifier.addListener(_onStockAlertUpdate);
+        
+        debugPrint("[BusinessOwnerHome] Notifier listener'ları eklendi.");
+    }
+
+    void _removeSocketServiceAndNotifierListeners() {
+        _connectivityService.isOnlineNotifier.removeListener(_onConnectivityChanged);
+        _socketService.connectionStatusNotifier.removeListener(_updateSocketStatusFromService);
+        
+        orderStatusUpdateNotifier.removeListener(_handleSilentOrderUpdatesThrottled);
+        shouldRefreshWaitingCountNotifier.removeListener(_handleWaitingCountRefreshThrottled);
+        shouldRefreshTablesNotifier.removeListener(_handleTablesRefreshThrottled);
+        syncStatusMessageNotifier.removeListener(_handleSyncStatusMessage);
+        stockAlertNotifier.removeListener(_onStockAlertUpdate);
+        debugPrint("[BusinessOwnerHome] Tüm notifier listener'ları kaldırıldı.");
+    }
+
+    // 🔥 THROTTLED: Optimized notifier handlers
+    void _handleTablesRefreshThrottled() {
+        if (!_shouldProcessUpdate()) {
+            debugPrint('[BusinessOwnerHome] Ekran aktif değil, tables refresh atlandı.');
+            return;
+        }
+        
+        _throttledEventProcessor('tables_refresh', () async {
+            debugPrint('[BusinessOwnerHome] Enhanced notification tables refresh tetiklendi');
+            await _fetchActiveOrderCounts();
+            await _checkStockAlerts();
+        });
+    }
+
+    void _handleWaitingCountRefreshThrottled() {
+        if (!_shouldProcessUpdate()) {
+            debugPrint('[BusinessOwnerHome] Ekran aktif değil, waiting count refresh atlandı.');
+            return;
+        }
+        
+        _throttledEventProcessor('waiting_count_refresh', () async {
+            debugPrint('[BusinessOwnerHome] Waiting count refresh tetiklendi');
+            await _fetchActiveOrderCounts();
+        });
+    }
+
+    void _handleSilentOrderUpdatesThrottled() {
+        final notificationData = orderStatusUpdateNotifier.value;
+        
+        if (notificationData == null || !_shouldProcessUpdate()) {
+            if (notificationData != null) {
+                debugPrint("[BusinessOwnerHome] Ekran aktif değil, bildirim atlandı: ${notificationData['event_type']}");
+            }
+            return;
+        }
+        
+        final eventType = notificationData['event_type'] as String?;
+        debugPrint("[BusinessOwnerHome] Anlık güncelleme alındı: $eventType");
+        
+        // 🔥 KDS events get immediate processing
+        if (_isKdsEvent(eventType)) {
+            debugPrint("[BusinessOwnerHome] 🔥 KDS event detected, using priority refresh: $eventType");
+            _immediateEventProcessor('kds_direct_$eventType', () async {
+                await _fetchActiveOrderCounts();
+                await _checkStockAlerts();
+            });
+            return;
+        }
+        
+        // Regular events get throttled
+        if (_shouldRefreshForEvent(eventType) || notificationData['is_paid_update'] == true) {
+            _throttledEventProcessor('order_update_$eventType', () async {
+                debugPrint("[BusinessOwnerHome] Sayaçları etkileyen bir olay geldi, sayılar yenileniyor.");
+                await _fetchActiveOrderCounts();
+                await _checkStockAlerts();
+            });
+        } else {
+            debugPrint("[BusinessOwnerHome] Sayaçları etkilemeyen olay, atlandı: $eventType");
+        }
+    }
+
+    void _onStockAlertUpdate() {
+        if (!_shouldProcessUpdate()) return;
+        
+        if (_hasStockAlerts != stockAlertNotifier.value) {
+            debugPrint("[BusinessOwnerHome] Stok uyarısı durumu güncellendi: ${stockAlertNotifier.value}");
+            setState(() {
+                _hasStockAlerts = stockAlertNotifier.value;
+            });
+        }
+    }
+    
+    void _handleSyncStatusMessage() {
+        final message = syncStatusMessageNotifier.value;
+        if (message != null && _shouldProcessUpdate()) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                    content: Text(message),
+                    backgroundColor: Colors.teal.shade700,
+                ),
+            );
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+                syncStatusMessageNotifier.value = null;
+            });
+        }
+    }
+    
+    void _onConnectivityChanged() {
+        if(_shouldProcessUpdate()) {
+            setState(() {
+                debugPrint("BusinessOwnerHome: Connectivity changed. Rebuilding UI.");
+            });
+            if (_connectivityService.isOnlineNotifier.value) {
+                _socketService.connectAndListen();
+            }
+        }
+    }
+    
+    Future<void> _logout() async {
+        debugPrint('[BusinessOwnerHome] Logout işlemi başlatılıyor...');
+        
+        try {
+            ConnectionManager().stopMonitoring();
+            globalHandler.GlobalNotificationHandler.cleanup();
+        } catch (e) {
+            debugPrint('❌ [BusinessOwnerHome] Logout cleanup hatası: $e');
+        }
+        
+        _socketService.reset();
+        UserSession.clearSession();
+        if (mounted) {
+            navigatorKey.currentState?.pushAndRemoveUntil(
+                MaterialPageRoute(builder: (context) => const LoginScreen()),
+                (Route<dynamic> route) => false,
+            );
+        }
+    }
+    
+    Future<void> _initializeAsyncDependencies() async {
+        await _loadUserSessionIfNeeded();
+        _socketService.connectAndListen();
+        await _fetchUserAccessibleKdsScreens();
+        _buildAndSetActiveTabs();
+        await _fetchActiveOrderCounts();
+        _startOrderCountRefreshTimer();
+        await _checkStockAlerts();
+        
+        if (!ConnectionManager().isMonitoring) {
+            ConnectionManager().startMonitoring();
+            debugPrint('[BusinessOwnerHome] Connection manager başlatıldı');
+        }
+    }
+    
+    Future<void> _loadUserSessionIfNeeded() async {
+        if (UserSession.token.isEmpty && widget.token.isNotEmpty) {
+            debugPrint("BusinessOwnerHome: UserSession boş, widget.token ile dolduruluyor.");
+            try {
+                Map<String, dynamic> decodedToken = JwtDecoder.decode(widget.token);
+                UserSession.storeLoginData({'access': widget.token, ...decodedToken});
+            } catch (e) {
+                debugPrint("BusinessOwnerHome: Token decode error: $e");
+                UserSession.clearSession();
+                if (mounted) _logout();
+            }
+        }
     }
     
     Future<void> _checkStockAlerts() async {
@@ -125,131 +588,6 @@ class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
             debugPrint("Stok uyarıları kontrol edilirken hata: $e");
             if (mounted && _hasStockAlerts) {
                 setState(() => _hasStockAlerts = false);
-            }
-        }
-    }
-    
-    @override
-    void didChangeDependencies() {
-        super.didChangeDependencies();
-        final route = ModalRoute.of(context);
-        if (route is PageRoute) {
-            routeObserver.subscribe(this, route);
-        }
-        
-        if (ModalRoute.of(context)?.isCurrent == true && !_isInitialLoadComplete) {
-            _fetchActiveOrderCounts().then((_) {
-                if (mounted) {
-                    setState(() { _isInitialLoadComplete = true; });
-                }
-            });
-            _checkStockAlerts();
-        }
-    }
-
-    @override
-    void didPopNext() {
-        super.didPopNext();
-        debugPrint("BusinessOwnerHome: didPopNext - Ekran tekrar aktif oldu, veriler yenileniyor.");
-        _fetchActiveOrderCounts();
-        _checkStockAlerts();
-    }
-    
-    @override
-    void didPushNext() {
-        debugPrint("BusinessOwnerHome: didPushNext - Ekran arka plana gidiyor.");
-        super.didPushNext();
-    }
-
-    void _addSocketServiceAndNotifierListeners() {
-        _connectivityService.isOnlineNotifier.addListener(_onConnectivityChanged);
-        _socketService.connectionStatusNotifier.addListener(_updateSocketStatusFromService);
-        
-        orderStatusUpdateNotifier.addListener(_handleSilentOrderUpdates);
-        shouldRefreshWaitingCountNotifier.addListener(_fetchActiveOrderCounts);
-        syncStatusMessageNotifier.addListener(_handleSyncStatusMessage);
-        stockAlertNotifier.addListener(_onStockAlertUpdate);
-        debugPrint("[BusinessOwnerHome] Notifier listener'ları eklendi.");
-    }
-
-    void _removeSocketServiceAndNotifierListeners() {
-        _connectivityService.isOnlineNotifier.removeListener(_onConnectivityChanged);
-        _socketService.connectionStatusNotifier.removeListener(_updateSocketStatusFromService);
-        
-        orderStatusUpdateNotifier.removeListener(_handleSilentOrderUpdates);
-        shouldRefreshWaitingCountNotifier.removeListener(_fetchActiveOrderCounts);
-        syncStatusMessageNotifier.removeListener(_handleSyncStatusMessage);
-        stockAlertNotifier.removeListener(_onStockAlertUpdate);
-        debugPrint("[BusinessOwnerHome] Tüm notifier listener'ları kaldırıldı.");
-    }
-
-    void _onStockAlertUpdate() {
-        if (!mounted) return;
-        if (_hasStockAlerts != stockAlertNotifier.value) {
-            debugPrint("[BusinessOwnerHome] Stok uyarısı durumu güncellendi: ${stockAlertNotifier.value}");
-            setState(() {
-                _hasStockAlerts = stockAlertNotifier.value;
-            });
-        }
-    }
-    
-    void _handleSyncStatusMessage() {
-        final message = syncStatusMessageNotifier.value;
-        if (message != null && mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                    content: Text(message),
-                    backgroundColor: Colors.teal.shade700,
-                ),
-            );
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-                syncStatusMessageNotifier.value = null;
-            });
-        }
-    }
-    
-    void _onConnectivityChanged() {
-        if(mounted) {
-            setState(() {
-                debugPrint("BusinessOwnerHome: Connectivity changed. Rebuilding UI.");
-            });
-            if (_connectivityService.isOnlineNotifier.value) {
-                _socketService.connectAndListen();
-            }
-        }
-    }
-    
-    Future<void> _logout() async {
-        _socketService.reset();
-        UserSession.clearSession();
-        if (mounted) {
-            navigatorKey.currentState?.pushAndRemoveUntil(
-                MaterialPageRoute(builder: (context) => const LoginScreen()),
-                (Route<dynamic> route) => false,
-            );
-        }
-    }
-    
-    Future<void> _initializeAsyncDependencies() async {
-        await _loadUserSessionIfNeeded();
-        _socketService.connectAndListen();
-        await _fetchUserAccessibleKdsScreens();
-        _buildAndSetActiveTabs();
-        await _fetchActiveOrderCounts();
-        _startOrderCountRefreshTimer();
-        await _checkStockAlerts();
-    }
-    
-    Future<void> _loadUserSessionIfNeeded() async {
-        if (UserSession.token.isEmpty && widget.token.isNotEmpty) {
-            debugPrint("BusinessOwnerHome: UserSession boş, widget.token ile dolduruluyor.");
-            try {
-                Map<String, dynamic> decodedToken = JwtDecoder.decode(widget.token);
-                UserSession.storeLoginData({'access': widget.token, ...decodedToken});
-            } catch (e) {
-                debugPrint("BusinessOwnerHome: Token decode error: $e");
-                UserSession.clearSession();
-                if (mounted) _logout();
             }
         }
     }
@@ -291,9 +629,9 @@ class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
     void _startOrderCountRefreshTimer() {
         _orderCountRefreshTimer?.cancel();
         _orderCountRefreshTimer = Timer.periodic(const Duration(seconds: 45), (timer) {
-            if (mounted && ModalRoute.of(context)?.isCurrent == true) {
-                _fetchActiveOrderCounts();
-                _checkStockAlerts();
+            if (_shouldProcessUpdate()) {
+                _safeRefreshDataWithThrottling();
+                _checkAndReconnectIfNeeded();
             }
         });
     }
@@ -318,40 +656,31 @@ class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
                 _activeTableOrderCountNotifier.value = results[0] as int;
                 _activeTakeawayOrderCountNotifier.value = results[1] as int;
                 _activeKdsOrderCountNotifier.value = results[2] as int;
+                
+                debugPrint("[BusinessOwnerHome] Order counts updated - Table: ${results[0]}, Takeaway: ${results[1]}, KDS: ${results[2]}");
             }
         } catch (e) {
-            debugPrint("Aktif sipariş sayıları çekilirken hata: $e");
-        }
-    }
-    
-    // === İYİLEŞTİRME 2: Daha Akıllı Bildirim İşleme ===
-    void _handleSilentOrderUpdates() {
-        final notificationData = orderStatusUpdateNotifier.value;
-        // Bu metodun sadece bu ekran aktifken çalışmasını sağlıyoruz.
-        if (notificationData != null && mounted && ModalRoute.of(context)!.isCurrent) {
-            debugPrint("[BusinessOwnerHome] Anlık güncelleme alındı: ${notificationData['event_type']}");
-            
-            final eventType = notificationData['event_type'] as String?;
-            
-            // Sadece gerçekten sayaçları ve listeleri etkileyen bildirimlerde API'yi tekrar çağır.
-            // Bu, gereksiz ağ trafiğini ve UI'ın sürekli titremesini engeller.
-            if (eventType == NotificationEventTypes.guestOrderPendingApproval ||
-                eventType == NotificationEventTypes.orderCancelledUpdate ||
-                notificationData['is_paid_update'] == true) 
-            {
-                debugPrint("[BusinessOwnerHome] Sayaçları etkileyen bir olay geldi, sayılar yenileniyor.");
-                _fetchActiveOrderCounts();
-            }
+            debugPrint("❌ [BusinessOwnerHome] Aktif sipariş sayıları çekilirken hata: $e");
         }
     }
     
     void _updateSocketStatusFromService() {
-        if (mounted) {
-            debugPrint("[BusinessOwnerHome] SocketService bağlantı durumu: ${_socketService.connectionStatusNotifier.value}");
-            if (_socketService.connectionStatusNotifier.value == 'Bağlandı' && 
+        if (_shouldProcessUpdate()) {
+            final connectionStatus = _socketService.connectionStatusNotifier.value;
+            debugPrint("[BusinessOwnerHome] SocketService bağlantı durumu: $connectionStatus");
+            
+            if (connectionStatus == 'Bağlandı' && 
                 _currentKdsRoomSlugForSocketService != null && 
                 UserSession.token.isNotEmpty) {
                 _socketService.joinKdsRoom(_currentKdsRoomSlugForSocketService!);
+            }
+            
+            if (connectionStatus == 'Bağlandı') {
+                Future.delayed(Duration(seconds: 1), () {
+                    if (_shouldProcessUpdate()) {
+                        _safeRefreshDataWithThrottling();
+                    }
+                });
             }
         }
     }
@@ -673,6 +1002,46 @@ class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
         }
     }
 
+    Widget _buildConnectionStatusIndicator() {
+        return ValueListenableBuilder<String>(
+            valueListenable: _socketService.connectionStatusNotifier,
+            builder: (context, status, child) {
+                Color indicatorColor;
+                IconData indicatorIcon;
+                
+                if (status == 'Bağlandı') {
+                    indicatorColor = Colors.green;
+                    indicatorIcon = Icons.wifi;
+                } else if (status.contains('bekleniyor') || status.contains('deneniyor')) {
+                    indicatorColor = Colors.orange;
+                    indicatorIcon = Icons.wifi_tethering;
+                } else {
+                    indicatorColor = Colors.red;
+                    indicatorIcon = Icons.wifi_off;
+                }
+                
+                return Padding(
+                    padding: const EdgeInsets.only(right: 8.0),
+                    child: GestureDetector(
+                        onTap: _checkAndReconnectIfNeeded,
+                        child: Container(
+                            padding: EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                                color: indicatorColor.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Icon(
+                                indicatorIcon,
+                                color: indicatorColor,
+                                size: 16,
+                            ),
+                        ),
+                    ),
+                );
+            },
+        );
+    }
+
     @override
     Widget build(BuildContext context) {
         final l10n = AppLocalizations.of(context)!;
@@ -695,6 +1064,10 @@ class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
                                 colors: [Color(0xFF283593), Color(0xFF455A64)],
                                 begin: Alignment.topLeft,
                                 end: Alignment.bottomRight))),
+                    actions: [
+                        _buildConnectionStatusIndicator(),
+                        UserProfileAvatar(onLogout: _logout),
+                    ],
                 ),
                 body: Container(
                     decoration: BoxDecoration(
@@ -756,6 +1129,7 @@ class _BusinessOwnerHomeState extends State<BusinessOwnerHome>
                     )
                     : null,
                 actions: [
+                    _buildConnectionStatusIndicator(),
                     UserProfileAvatar(onLogout: _logout),
                 ],
             ),

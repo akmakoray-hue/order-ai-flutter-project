@@ -1,5 +1,7 @@
 // lib/screens/takeaway_order_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -32,17 +34,27 @@ class TakeawayOrderScreen extends StatefulWidget {
   _TakeawayOrderScreenState createState() => _TakeawayOrderScreenState();
 }
 
-class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAware {
+// 🎯 THUNDERING HERD ÇÖZÜMEİ: RouteAware ve WidgetsBindingObserver eklendi
+class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> 
+    with RouteAware, WidgetsBindingObserver {
+  
   late TakeawayOrderScreenController _controller;
   final ScrollController _scrollController = ScrollController();
   
   final PagerService _pagerService = PagerService.instance;
   bool _isDependenciesInitialized = false;
 
+  // 🎯 THUNDERING HERD ÇÖZÜMEİ: Ekran durumu takibi
+  bool _isCurrent = true;
+  bool _isAppInForeground = true;
+
   @override
   void initState() {
     super.initState();
     debugPrint("TakeawayOrderScreen: initState");
+    
+    // 🎯 THUNDERING HERD ÇÖZÜMEİ: WidgetsBindingObserver eklendi
+    WidgetsBinding.instance.addObserver(this);
     
     _controller = TakeawayOrderScreenController(
       token: widget.token,
@@ -61,14 +73,32 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
       }
     });
 
+    // 🎯 THUNDERING HERD ÇÖZÜMEİ: Notifier listener'lar optimized
     shouldRefreshTablesNotifier.addListener(_handleDataRefreshRequest);
     orderStatusUpdateNotifier.addListener(_handleSpecificOrderStatusUpdate);
+
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[TakeawayOrderScreen] 📡 Global refresh received: ${data['event_type']}');
+      _safeRefreshData();
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[TakeawayOrderScreen] 📱 Screen became active notification received');
+      if (_isCurrent) {
+        _safeRefreshData();
+      }
+    });
   }
 
   @override
   void dispose() {
     debugPrint("TakeawayOrderScreen: dispose");
+    
+    // 🎯 THUNDERING HERD ÇÖZÜMEİ: Observer'ları temizle
     routeObserver.unsubscribe(this);
+    WidgetsBinding.instance.removeObserver(this);
+    
     _scrollController.dispose();
     shouldRefreshTablesNotifier.removeListener(_handleDataRefreshRequest);
     orderStatusUpdateNotifier.removeListener(_handleSpecificOrderStatusUpdate);
@@ -89,34 +119,90 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
     }
   }
 
+  // 🎯 THUNDERING HERD ÇÖZÜMEİ: RouteAware metodları
+  @override
+  void didPush() {
+    _isCurrent = true;
+    debugPrint('TakeawayOrderScreen: didPush - Ekran aktif oldu.');
+  }
+
   @override
   void didPopNext() {
+    _isCurrent = true;
     debugPrint("TakeawayOrderScreen: didPopNext - Ekran tekrar aktif oldu, veriler yenileniyor.");
-    _controller.loadFirstPage();
+    _safeRefreshData();
     super.didPopNext();
   }
 
-  void _handleDataRefreshRequest() {
-    if (shouldRefreshTablesNotifier.value && mounted) {
-      debugPrint("TakeawayOrderScreen: shouldRefreshTablesNotifier tetiklendi, veriler yenileniyor.");
-      _controller.loadFirstPage();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) shouldRefreshTablesNotifier.value = false;
+  @override
+  void didPushNext() {
+    _isCurrent = false;
+    debugPrint("TakeawayOrderScreen: didPushNext - Ekran arka plana gitti.");
+  }
+
+  @override
+  void didPop() {
+    _isCurrent = false;
+    debugPrint("TakeawayOrderScreen: didPop - Ekran kapatıldı.");
+  }
+
+  // 🎯 THUNDERING HERD ÇÖZÜMEİ: App lifecycle kontrolü
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    _isAppInForeground = state == AppLifecycleState.resumed;
+    
+    if (_isAppInForeground && _isCurrent) {
+      debugPrint('TakeawayOrderScreen: App foreground\'a geldi, veriler yenileniyor.');
+      _safeRefreshData();
+    }
+  }
+
+  // 🎯 THUNDERING HERD ÇÖZÜMEİ: Sadece aktif ekranlar için güncelleme kontrolü
+  bool _shouldProcessUpdate() {
+    return mounted && _isCurrent && _isAppInForeground;
+  }
+
+  // 🎯 RefreshManager ile güvenli veri yenileme
+  void _safeRefreshData() {
+    if (_shouldProcessUpdate()) {
+      final refreshKey = 'takeaway_order_screen_${widget.businessId}';
+      RefreshManager.throttledRefresh(refreshKey, () async {
+        await _controller.loadFirstPage();
       });
     }
   }
 
-  // === DEĞİŞİKLİK BURADA: 'isCurrent' kontrolü kaldırıldı ===
-  void _handleSpecificOrderStatusUpdate() {
-    if (orderStatusUpdateNotifier.value != null && mounted) {
-      _controller.loadFirstPage();
+  // 🎯 THUNDERING HERD ÇÖZÜMEİ: Optimized notifier handlers
+  void _handleDataRefreshRequest() {
+    if (shouldRefreshTablesNotifier.value && _shouldProcessUpdate()) {
+      debugPrint("TakeawayOrderScreen: shouldRefreshTablesNotifier tetiklendi, veriler yenileniyor.");
+      _safeRefreshData();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) shouldRefreshTablesNotifier.value = false;
+      });
+    } else if (shouldRefreshTablesNotifier.value) {
+      debugPrint("TakeawayOrderScreen: Ekran aktif değil, shouldRefreshTablesNotifier atlandı.");
     }
   }
-  // === DEĞİŞİKLİK SONU ===
+
+  void _handleSpecificOrderStatusUpdate() {
+    if (orderStatusUpdateNotifier.value != null && _shouldProcessUpdate()) {
+      debugPrint("TakeawayOrderScreen: orderStatusUpdateNotifier tetiklendi, veriler yenileniyor.");
+      _safeRefreshData();
+    } else if (orderStatusUpdateNotifier.value != null) {
+      debugPrint("TakeawayOrderScreen: Ekran aktif değil, orderStatusUpdate atlandı.");
+    }
+  }
 
   void _showErrorSnackbar(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), backgroundColor: Colors.redAccent));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message), 
+        backgroundColor: Colors.redAccent
+      )
+    );
   }
 
   Future<void> _approveOrder(AppOrder.Order order) async {
@@ -127,7 +213,10 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
       await OrderService.approveGuestOrder(token: widget.token, orderId: order.id!);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.takeawayOrderApproved), backgroundColor: Colors.green),
+          SnackBar(
+            content: Text(l10n.takeawayOrderApproved), 
+            backgroundColor: Colors.green
+          ),
         );
         _controller.loadFirstPage();
       }
@@ -147,8 +236,17 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
         title: Text(l10n.takeawayDialogRejectTitle),
         content: Text(l10n.takeawayDialogRejectContent),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: Text(l10n.dialogButtonNo)),
-          TextButton(onPressed: () => Navigator.pop(dialogContext, true), child: Text(l10n.takeawayDialogButtonReject, style: const TextStyle(color: Colors.red))),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false), 
+            child: Text(l10n.dialogButtonNo)
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true), 
+            child: Text(
+              l10n.takeawayDialogButtonReject, 
+              style: const TextStyle(color: Colors.red)
+            )
+          ),
         ],
       ),
     );
@@ -157,7 +255,12 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
     try {
       await OrderService.rejectGuestOrder(token: widget.token, orderId: order.id!);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l10n.takeawayOrderRejected), backgroundColor: Colors.orangeAccent));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(l10n.takeawayOrderRejected), 
+            backgroundColor: Colors.orangeAccent
+          )
+        );
         _controller.loadFirstPage();
       }
     } catch (e) {
@@ -176,8 +279,17 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
         title: Text(l10n.dialogCancelOrderTitle),
         content: Text(l10n.takeawayDialogCancelContent),
         actions: <Widget>[
-          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: Text(l10n.dialogButtonNo)),
-          TextButton(onPressed: () => Navigator.pop(dialogContext, true), child: Text(l10n.dialogButtonYesCancel, style: const TextStyle(color: Colors.red))),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false), 
+            child: Text(l10n.dialogButtonNo)
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true), 
+            child: Text(
+              l10n.dialogButtonYesCancel, 
+              style: const TextStyle(color: Colors.red)
+            )
+          ),
         ],
       ),
     );
@@ -189,9 +301,22 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
       if (mounted) {
         if (response.statusCode == 200 || response.statusCode == 204) {
           if (pagerSystemIdToUpdate != null) {
-            try { await _pagerService.updatePager(widget.token, pagerSystemIdToUpdate, status: 'available'); } catch (e) { /* Hata loglanabilir */ }
+            try { 
+              await _pagerService.updatePager(
+                widget.token, 
+                pagerSystemIdToUpdate, 
+                status: 'available'
+              ); 
+            } catch (e) { 
+              debugPrint('TakeawayOrderScreen: Pager güncelleme hatası: $e');
+            }
           }
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l10n.infoOrderCancelled), backgroundColor: Colors.green));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(l10n.infoOrderCancelled), 
+              backgroundColor: Colors.green
+            )
+          );
           _controller.loadFirstPage();
         } else {
           _showErrorSnackbar(l10n.takeawayErrorCancellingWithCode(response.statusCode.toString()));
@@ -207,14 +332,26 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
   Future<void> _openPagerAssignmentScreenAndAssign(AppOrder.Order order) async {
     final l10n = AppLocalizations.of(context)!;
     if (!mounted) return;
-    final String? selectedBluetoothDeviceId = await Navigator.push<String>(context, MaterialPageRoute(builder: (_) => const PagerAssignmentScreen()));
+    final String? selectedBluetoothDeviceId = await Navigator.push<String>(
+      context, 
+      MaterialPageRoute(builder: (_) => const PagerAssignmentScreen())
+    );
     if (selectedBluetoothDeviceId != null && selectedBluetoothDeviceId.isNotEmpty && mounted) {
       setState(() => _controller.isFirstLoadRunning = true);
       try {
-        final response = await OrderService.updateOrder(widget.token, order.id!, {'pager_device_id_to_assign': selectedBluetoothDeviceId});
+        final response = await OrderService.updateOrder(
+          widget.token, 
+          order.id!, 
+          {'pager_device_id_to_assign': selectedBluetoothDeviceId}
+        );
         if (mounted) {
           if (response.statusCode == 200) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l10n.infoPagerAssigned), backgroundColor: Colors.green));
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(l10n.infoPagerAssigned), 
+                backgroundColor: Colors.green
+              )
+            );
             _controller.loadFirstPage();
           } else {
             _showErrorSnackbar(l10n.takeawayErrorAssigningPagerWithCode(response.statusCode.toString()));
@@ -297,7 +434,16 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
       return const Center(child: CircularProgressIndicator(color: Colors.white));
     }
     if (_controller.errorMessage.isNotEmpty && _controller.takeawayOrders.isEmpty) {
-      return Center(child: Padding(padding: const EdgeInsets.all(16.0), child: Text(_controller.errorMessage, style: const TextStyle(color: Colors.orangeAccent, fontSize: 16), textAlign: TextAlign.center)));
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0), 
+          child: Text(
+            _controller.errorMessage, 
+            style: const TextStyle(color: Colors.orangeAccent, fontSize: 16), 
+            textAlign: TextAlign.center
+          )
+        )
+      );
     }
     if (_controller.takeawayOrders.isEmpty) {
       return RefreshIndicator(
@@ -315,7 +461,15 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
                   children: [
                     const Icon(Icons.no_food_outlined, size: 80, color: Colors.white70),
                     const SizedBox(height: 16),
-                    Text(l10n.takeawayNoActiveOrders, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 17)),
+                    Text(
+                      l10n.takeawayNoActiveOrders, 
+                      textAlign: TextAlign.center, 
+                      style: const TextStyle(
+                        color: Colors.white70, 
+                        fontWeight: FontWeight.bold, 
+                        fontSize: 17
+                      )
+                    ),
                   ],
                 ),
               ),
@@ -351,7 +505,10 @@ class _TakeawayOrderScreenState extends State<TakeawayOrderScreen> with RouteAwa
         itemCount: _controller.takeawayOrders.length + (_controller.isLoadMoreRunning ? 1 : 0),
         itemBuilder: (context, index) {
           if (index == _controller.takeawayOrders.length) {
-            return const Padding(padding: EdgeInsets.symmetric(vertical: 20.0), child: Center(child: CircularProgressIndicator(color: Colors.white)));
+            return const Padding(
+              padding: EdgeInsets.symmetric(vertical: 20.0), 
+              child: Center(child: CircularProgressIndicator(color: Colors.white))
+            );
           }
           final order = _controller.takeawayOrders[index];
           return TakeawayOrderCardWidget(

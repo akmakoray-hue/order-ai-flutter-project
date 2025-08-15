@@ -1,4 +1,6 @@
 // lib/screens/create_category_screen.dart
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data'; // Uint8List için
@@ -37,7 +39,35 @@ class _CreateCategoryScreenState extends State<CreateCategoryScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[CreateCategoryScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'create_category_screen_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await fetchCategories();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[CreateCategoryScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'create_category_screen_active_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await fetchCategories();
+        });
+      }
+    });
+
     fetchCategories();
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
   }
 
   Future<void> fetchCategories() async {
@@ -236,12 +266,6 @@ class _CreateCategoryScreenState extends State<CreateCategoryScreen> {
         });
       }
     }
-  }
-
-  @override
-  void dispose() {
-    _nameController.dispose();
-    super.dispose();
   }
 
   @override

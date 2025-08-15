@@ -1,5 +1,8 @@
 // lib/screens/manage_shifts_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
+import 'dart:convert'; // jsonDecode için eklendi
 import 'package:flutter/material.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
@@ -23,7 +26,36 @@ class _ManageShiftsScreenState extends State<ManageShiftsScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[ManageShiftsScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'manage_shifts_screen';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchShifts();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[ManageShiftsScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'manage_shifts_screen_active';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchShifts();
+        });
+      }
+    });
+
     _fetchShifts();
+  }
+
+  @override
+  void dispose() {
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
+    super.dispose();
   }
 
   Future<void> _fetchShifts() async {
@@ -80,8 +112,44 @@ class _ManageShiftsScreenState extends State<ManageShiftsScreen> {
     }
   }
 
+  void _showLimitReachedDialog(String message) {
+    final l10n = AppLocalizations.of(context)!;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(l10n.dialogLimitReachedTitle),
+        content: Text(message),
+        actions: [
+          TextButton(
+            child: Text(l10n.dialogButtonLater),
+            onPressed: () => Navigator.of(ctx).pop(),
+          ),
+          ElevatedButton(
+            child: Text(l10n.dialogButtonUpgradePlan),
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const SubscriptionScreen()));
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _showAddEditShiftDialog({Shift? shift}) async {
     final l10n = AppLocalizations.of(context)!;
+    
+    // *** Basit limit kontrolü - maxShifts yoksa varsayılan limit kullan ***
+    final currentLimits = UserSession.limitsNotifier.value;
+    final maxShiftsLimit = 10; // Varsayılan limit
+    
+    if (shift == null && _shifts.length >= maxShiftsLimit) {
+      _showLimitReachedDialog(
+        'Maksimum $maxShiftsLimit vardiya oluşturabilirsiniz. Daha fazla vardiya için planınızı yükseltin.'
+      );
+      return;
+    }
+
     final nameController = TextEditingController(text: shift?.name ?? '');
     TimeOfDay startTime = shift?.startTime ?? const TimeOfDay(hour: 9, minute: 0);
     TimeOfDay endTime = shift?.endTime ?? const TimeOfDay(hour: 17, minute: 0);
@@ -162,10 +230,24 @@ class _ManageShiftsScreenState extends State<ManageShiftsScreen> {
                     }
                     Navigator.of(ctx).pop(true);
                   } catch (e) {
+                    String errorMessage = e.toString().replaceFirst("Exception: ", "");
+                    final jsonStartIndex = errorMessage.indexOf('{');
+                    if (jsonStartIndex != -1) {
+                      try {
+                        final jsonString = errorMessage.substring(jsonStartIndex);
+                        final decodedError = jsonDecode(jsonString);
+                        if (decodedError is Map && decodedError['code'] == 'limit_reached') {
+                          Navigator.of(ctx).pop(); // Mevcut dialogu kapat
+                          _showLimitReachedDialog(decodedError['detail']);
+                          return;
+                        }
+                      } catch (_) {}
+                    }
+                    
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
-                          content: Text(dialogL10n.errorGeneral(e.toString()), style: const TextStyle(color: Colors.white)),
+                          content: Text(dialogL10n.errorGeneral(errorMessage), style: const TextStyle(color: Colors.white)),
                           backgroundColor: Colors.red,
                         ),
                       );
@@ -254,6 +336,8 @@ class _ManageShiftsScreenState extends State<ManageShiftsScreen> {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
+    final maxShiftsLimit = 10; // Varsayılan limit
+    
     return Scaffold(
       appBar: AppBar(
         title: Text(l10n.manageShiftsScreenTitle, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
@@ -267,6 +351,14 @@ class _ManageShiftsScreenState extends State<ManageShiftsScreen> {
             ),
           ),
         ),
+        actions: [
+          // === Basitleştirilmiş limit kontrolü ===
+          IconButton(
+            icon: const Icon(Icons.add, color: Colors.white),
+            tooltip: l10n.manageShiftsTooltipAdd,
+            onPressed: (_isLoading || _shifts.length >= maxShiftsLimit) ? null : () => _showAddEditShiftDialog(),
+          ),
+        ],
       ),
       body: Container(
         decoration: const BoxDecoration(
@@ -283,7 +375,24 @@ class _ManageShiftsScreenState extends State<ManageShiftsScreen> {
                 : RefreshIndicator(
                     onRefresh: _fetchShifts,
                     child: _shifts.isEmpty
-                        ? Center(child: Text(l10n.manageShiftsNoShiftsFound, style: const TextStyle(color: Colors.white70)))
+                        ? Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(l10n.manageShiftsNoShiftsFound, style: const TextStyle(color: Colors.white70, fontSize: 18)),
+                                const SizedBox(height: 10),
+                                ElevatedButton.icon(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.white.withOpacity(0.8),
+                                    foregroundColor: Colors.blue.shade900,
+                                  ),
+                                  icon: const Icon(Icons.add),
+                                  label: const Text('İlk Vardiyayı Oluştur'),
+                                  onPressed: () => _showAddEditShiftDialog(),
+                                ),
+                              ],
+                            ),
+                          )
                         : GridView.builder(
                             padding: const EdgeInsets.all(16.0),
                             gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
@@ -301,9 +410,9 @@ class _ManageShiftsScreenState extends State<ManageShiftsScreen> {
                   ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => _showAddEditShiftDialog(),
+        onPressed: (_isLoading || _shifts.length >= maxShiftsLimit) ? null : () => _showAddEditShiftDialog(),
         child: const Icon(Icons.add, color: Colors.white),
-        backgroundColor: Colors.blue,
+        backgroundColor: (_shifts.length >= maxShiftsLimit) ? Colors.grey : Colors.blue,
         tooltip: l10n.manageShiftsTooltipAdd,
       ),
     );

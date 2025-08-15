@@ -11,3 +11,4 @@ final ValueNotifier<Map<String, dynamic>?> pagerStatusUpdateNotifier = ValueNoti
 final ValueNotifier<Map<String, dynamic>?> informationalNotificationNotifier = ValueNotifier(null);
 final ValueNotifier<String?> syncStatusMessageNotifier = ValueNotifier(null);
 final ValueNotifier<bool> stockAlertNotifier = ValueNotifier<bool>(false);
+final ValueNotifier<Map<String, dynamic>?> kdsUpdateNotifier = ValueNotifier(null);

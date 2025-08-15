@@ -1,4 +1,7 @@
 // lib/screens/pager_management_screen.dart
+
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import '../services/bluetooth_pager_service.dart';
@@ -37,6 +40,28 @@ class _PagerManagementScreenState extends State<PagerManagementScreen> {
     _blePagerService = BluetoothPagerService();
     _blePagerService.addListener(_onBleServiceUpdate);
     pagerStatusUpdateNotifier.addListener(_handlePagerStatusSocketUpdate);
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[PagerManagementScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'pager_management_screen';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchSystemPagers();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[PagerManagementScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'pager_management_screen_active';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchSystemPagers();
+        });
+      }
+    });
+    
     // Servis başlatma işlemi didChangeDependencies'e taşındı.
   }
   
@@ -58,6 +83,8 @@ class _PagerManagementScreenState extends State<PagerManagementScreen> {
     _newPagerIdController.dispose();
     _newPagerNameController.dispose();
     _newPagerNotesController.dispose();
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
     super.dispose();
   }
 

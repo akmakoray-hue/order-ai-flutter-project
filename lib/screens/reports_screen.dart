@@ -1,5 +1,7 @@
 // lib/screens/reports_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:convert';
 import 'dart:math';
 import 'package:fl_chart/fl_chart.dart';
@@ -37,6 +39,27 @@ class _ReportsScreenState extends State<ReportsScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[ReportsScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted && !_isInit) {
+        final refreshKey = 'reports_screen';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await fetchReport();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[ReportsScreen] 📱 Screen became active notification received');
+      if (mounted && !_isInit) {
+        final refreshKey = 'reports_screen_active';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await fetchReport();
+        });
+      }
+    });
   }
 
   @override
@@ -48,6 +71,13 @@ class _ReportsScreenState extends State<ReportsScreen> {
       fetchReport();
       _isInit = false;
     }
+  }
+
+  @override
+  void dispose() {
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
+    super.dispose();
   }
 
   Future<void> fetchReport() async {

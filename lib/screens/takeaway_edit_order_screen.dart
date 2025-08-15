@@ -1,5 +1,7 @@
 // lib/screens/takeaway_edit_order_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -67,6 +69,27 @@ class _TakeawayEditOrderScreenState extends State<TakeawayEditOrderScreen> {
     super.initState();
     _isMounted = true;
     _updateCurrentOrderAndPagerInfo(widget.order);
+
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[TakeawayEditOrderScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (_isMounted && mounted) {
+        final refreshKey = 'takeaway_edit_order_screen_${currentOrder.id ?? "unknown"}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _refreshOrderDetails();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[TakeawayEditOrderScreen] 📱 Screen became active notification received');
+      if (_isMounted && mounted) {
+        final refreshKey = 'takeaway_edit_order_screen_active_${currentOrder.id ?? "unknown"}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _refreshOrderDetails();
+        });
+      }
+    });
   }
 
   @override

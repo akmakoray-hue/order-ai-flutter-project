@@ -1,5 +1,7 @@
 // lib/screens/manage_menu_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -35,7 +37,36 @@ class _ManageMenuScreenState extends State<ManageMenuScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[ManageMenuScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'manage_menu_screen_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await fetchMenuItems();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[ManageMenuScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'manage_menu_screen_active_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await fetchMenuItems();
+        });
+      }
+    });
+
     fetchMenuItems();
+  }
+
+  @override
+  void dispose() {
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
+    super.dispose();
   }
 
   Future<void> fetchMenuItems() async {
@@ -546,10 +577,12 @@ class _MenuItemModalState extends State<MenuItemModal> {
     
     final bool isNew = widget.menuItem == null;
 
-    if (isNew && widget.menuItems.length >= UserSession.maxMenuItems) {
+    // *** DEĞİŞİKLİK BURADA: Artık `UserSession.limitsNotifier`'dan gelen anlık veriyi kullanıyoruz. ***
+    final currentLimits = UserSession.limitsNotifier.value;
+    if (isNew && widget.menuItems.length >= currentLimits.maxMenuItems) {
       _showLimitReachedDialog(
         widget.l10n.createMenuItemErrorLimitExceeded(
-          UserSession.maxMenuItems.toString(),
+          currentLimits.maxMenuItems.toString(),
         )
       );
       return; 

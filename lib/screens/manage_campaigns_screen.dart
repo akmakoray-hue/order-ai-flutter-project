@@ -1,5 +1,7 @@
 // lib/screens/manage_campaigns_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
@@ -30,12 +32,45 @@ class _ManageCampaignsScreenState extends State<ManageCampaignsScreen> {
   bool _isDataFetched = false;
 
   @override
+  void initState() {
+    super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[ManageCampaignsScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'manage_campaigns_screen_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchCampaigns();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[ManageCampaignsScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'manage_campaigns_screen_active_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchCampaigns();
+        });
+      }
+    });
+  }
+
+  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (!_isDataFetched) {
       _fetchCampaigns();
       _isDataFetched = true;
     }
+  }
+
+  @override
+  void dispose() {
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
+    super.dispose();
   }
 
   Future<void> _fetchCampaigns() async {

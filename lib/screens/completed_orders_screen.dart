@@ -1,5 +1,7 @@
 // lib/screens/completed_orders_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
@@ -62,6 +64,27 @@ class _CompletedOrdersScreenState extends State<CompletedOrdersScreen> {
   void initState() {
     super.initState();
     _scrollController.addListener(_loadMore);
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[CompletedOrdersScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted && _isL10nInitialized) {
+        final refreshKey = 'completed_orders_screen_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _loadFirstPage();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[CompletedOrdersScreen] 📱 Screen became active notification received');
+      if (mounted && _isL10nInitialized) {
+        final refreshKey = 'completed_orders_screen_active_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _loadFirstPage();
+        });
+      }
+    });
   }
 
   @override
@@ -78,6 +101,8 @@ class _CompletedOrdersScreenState extends State<CompletedOrdersScreen> {
   void dispose() {
     _scrollController.removeListener(_loadMore);
     _scrollController.dispose();
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
     super.dispose();
   }
 

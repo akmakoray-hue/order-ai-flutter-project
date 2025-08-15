@@ -1,4 +1,6 @@
 // lib/screens/manage_variant_screen.dart
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -44,7 +46,36 @@ class _ManageVariantScreenState extends State<ManageVariantScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[ManageVariantScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'manage_variant_screen_${widget.menuItemId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchVariants();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[ManageVariantScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'manage_variant_screen_active_${widget.menuItemId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchVariants();
+        });
+      }
+    });
+
     _fetchVariants();
+  }
+
+  @override
+  void dispose() {
+    _variantNameController.dispose();
+    _variantPriceController.dispose();
+    super.dispose();
   }
 
   Future<void> _fetchVariants() async {
@@ -312,13 +343,6 @@ class _ManageVariantScreenState extends State<ManageVariantScreen> {
         setState(() => _isSubmitting = false);
       }
     }
-  }
-
-  @override
-  void dispose() {
-    _variantNameController.dispose();
-    _variantPriceController.dispose();
-    super.dispose();
   }
 
   Widget _buildVariantCard(MenuItemVariant variant, AppLocalizations l10n) {

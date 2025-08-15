@@ -1,5 +1,7 @@
 // lib/screens/new_order_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:collection/collection.dart';
@@ -38,6 +40,30 @@ class _NewOrderScreenState extends State<NewOrderScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[NewOrderScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted && _didChangeDependenciesRun) {
+        final refreshKey = 'new_order_screen_${widget.table['id']}_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          // Menü verilerini yenile
+          await _refreshMenuData();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[NewOrderScreen] 📱 Screen became active notification received');
+      if (mounted && _didChangeDependenciesRun) {
+        final refreshKey = 'new_order_screen_active_${widget.table['id']}_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          // Menü verilerini yenile
+          await _refreshMenuData();
+        });
+      }
+    });
+
     // Controller ve l10n, context gerektirdiği için didChangeDependencies içinde başlatılacak.
   }
   
@@ -86,6 +112,18 @@ class _NewOrderScreenState extends State<NewOrderScreen> {
           }
       });
       _didChangeDependenciesRun = true; // Bayrağı ayarla
+    }
+  }
+
+  // 🆕 Menü verilerini yenileme metodu
+  Future<void> _refreshMenuData() async {
+    if (_controller != null && mounted) {
+      try {
+        await _controller.initializeScreen();
+        if (mounted) setState(() {});
+      } catch (e) {
+        debugPrint('[NewOrderScreen] Menu refresh error: $e');
+      }
     }
   }
 

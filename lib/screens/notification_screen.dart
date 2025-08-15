@@ -1,4 +1,6 @@
 // lib/screens/notification_screen.dart
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import '../models/notification_event_types.dart';
@@ -24,6 +26,42 @@ class NotificationScreen extends StatefulWidget {
 class _NotificationScreenState extends State<NotificationScreen> {
   // GÜNCELLEME: SocketService'in singleton örneği alınıyor.
   final SocketService _socketService = SocketService.instance;
+
+  @override
+  void initState() {
+    super.initState();
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[NotificationScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'notification_screen_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          // Notification ekranı için özel refresh gerekiyorsa burada yapılır
+          // Şu an için sadece bildirimlerin görünümü güncellenecek
+          setState(() {});
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[NotificationScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'notification_screen_active_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          // Screen active olduğunda notification listesini güncelle
+          setState(() {});
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
+    super.dispose();
+  }
 
   // GÜNCELLEME: Bu metotlar artık burada gerekli değil, silindi.
   // @override

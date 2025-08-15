@@ -36,6 +36,9 @@ class _TakeawayOrderFormScreenState extends State<TakeawayOrderFormScreen> {
   bool isLoading = true;
   String errorMessage = '';
   bool _isDataFetched = false;
+  
+  // Navigasyon güvenliği için flag ekledik
+  bool _isNavigating = false;
 
   final TextEditingController _customerNameController = TextEditingController();
   final TextEditingController _customerPhoneController = TextEditingController();
@@ -174,14 +177,22 @@ class _TakeawayOrderFormScreenState extends State<TakeawayOrderFormScreen> {
     return total;
   }
 
+  // GÜNCELLENEN FONKSİYON - Navigasyon güvenliği eklendi
   Future<void> _handleCreateOrder() async {
     final l10n = AppLocalizations.of(context)!;
+    
+    // Zaten navigasyon yapılıyorsa çık
+    if (_isNavigating) return;
+    
     if (!_formKey.currentState!.validate()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.takeawayOrderFormErrorCustomerInfo), backgroundColor: Colors.orangeAccent),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l10n.takeawayOrderFormErrorCustomerInfo), backgroundColor: Colors.orangeAccent),
+        );
+      }
       return;
     }
+    
     if (basket.isEmpty) {
       if(mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -192,9 +203,11 @@ class _TakeawayOrderFormScreenState extends State<TakeawayOrderFormScreen> {
     }
 
     if(!mounted) return;
+    
     setState(() {
       isLoading = true;
       errorMessage = '';
+      _isNavigating = true; // Navigasyon flag'ini ayarla
     });
 
     Order newOrder = Order(
@@ -216,6 +229,8 @@ class _TakeawayOrderFormScreenState extends State<TakeawayOrderFormScreen> {
         offlineTableData: null,
       );
 
+      if (!mounted) return; // Async işlem sonrası mounted kontrolü
+
       final decodedString = utf8.decode(response.bodyBytes);
 
       if (response.statusCode == 201) {
@@ -227,12 +242,13 @@ class _TakeawayOrderFormScreenState extends State<TakeawayOrderFormScreen> {
           }
         } catch(_) {}
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(successMessage), backgroundColor: Colors.green),
-          );
-          Navigator.pop(context, true);
-        }
+        // Başarı mesajını göster
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(successMessage), backgroundColor: Colors.green),
+        );
+        
+        // Güvenli navigasyon
+        _safelyNavigateBack(true);
 
       } else {
         String errorMsg;
@@ -246,16 +262,37 @@ class _TakeawayOrderFormScreenState extends State<TakeawayOrderFormScreen> {
         } catch (_) {
           errorMsg = l10n.takeawayOrderFormErrorCreatingWithCode(response.statusCode.toString());
         }
-        if (mounted) setState(() => errorMessage = errorMsg);
+        
+        setState(() {
+          errorMessage = errorMsg;
+          _isNavigating = false; // Hata durumunda flag'i sıfırla
+        });
       }
     } catch (e) {
       if (mounted) {
         setState(() {
           errorMessage = l10n.takeawayOrderFormErrorCreatingGeneric(e.toString());
+          _isNavigating = false; // Hata durumunda flag'i sıfırla
         });
       }
     } finally {
-      if (mounted) setState(() => isLoading = false);
+      if (mounted && !_isNavigating) {
+        setState(() => isLoading = false);
+      }
+    }
+  }
+
+  // GÜVENLİ NAVİGASYON FONKSİYONU
+  void _safelyNavigateBack([bool? result]) {
+    if (!mounted || _isNavigating == false) return;
+    
+    try {
+      if (Navigator.canPop(context)) {
+        Navigator.pop(context, result);
+      }
+    } catch (e) {
+      debugPrint('Navigation error: $e');
+      // Eğer pop başarısız olursa, alternatif olarak pushReplacement kullanabilirsiniz
     }
   }
 
@@ -276,7 +313,8 @@ class _TakeawayOrderFormScreenState extends State<TakeawayOrderFormScreen> {
         centerTitle: true,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
+          // GÜNCELLENEN BACK BUTTON - Güvenli navigasyon
+          onPressed: () => _safelyNavigateBack(),
         ),
         flexibleSpace: Container(
           decoration: const BoxDecoration(
@@ -380,7 +418,8 @@ class _TakeawayOrderFormScreenState extends State<TakeawayOrderFormScreen> {
                               padding: const EdgeInsets.symmetric(vertical: 16),
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                             ),
-                            onPressed: isLoading || basket.isEmpty
+                            // GÜNCELLENEN BUTTON - Navigasyon flag kontrolü eklendi
+                            onPressed: (isLoading || basket.isEmpty || _isNavigating)
                                 ? null
                                 : _handleCreateOrder,
                             child: isLoading

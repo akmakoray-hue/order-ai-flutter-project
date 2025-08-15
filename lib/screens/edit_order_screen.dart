@@ -1,5 +1,7 @@
 // lib/screens/edit_order_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -69,6 +71,27 @@ class _EditOrderScreenState extends State<EditOrderScreen> {
     _isMounted = true;
     _fetchedBusinessName = "İşletmeniz";
     _updateCurrentOrder(AppOrder.Order.fromJson(widget.order as Map<String, dynamic>));
+
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[EditOrderScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (_isMounted && mounted) {
+        final refreshKey = 'edit_order_screen_${currentOrder.id ?? "unknown"}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _refreshOrderDetails();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[EditOrderScreen] 📱 Screen became active notification received');
+      if (_isMounted && mounted) {
+        final refreshKey = 'edit_order_screen_active_${currentOrder.id ?? "unknown"}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _refreshOrderDetails();
+        });
+      }
+    });
   }
 
   @override

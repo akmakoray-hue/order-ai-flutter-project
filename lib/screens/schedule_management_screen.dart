@@ -1,5 +1,7 @@
 // lib/screens/schedule_management_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:table_calendar/table_calendar.dart';
@@ -52,7 +54,36 @@ class _ScheduleManagementScreenState extends State<ScheduleManagementScreen> {
   void initState() {
     super.initState();
     _selectedDay = _focusedDay;
+    
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[ScheduleManagementScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        final refreshKey = 'schedule_management_screen_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchInitialData();
+        });
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[ScheduleManagementScreen] 📱 Screen became active notification received');
+      if (mounted) {
+        final refreshKey = 'schedule_management_screen_active_${widget.businessId}';
+        RefreshManager.throttledRefresh(refreshKey, () async {
+          await _fetchInitialData();
+        });
+      }
+    });
+
     _fetchInitialData();
+  }
+
+  @override
+  void dispose() {
+    // NotificationCenter listener'ları temizlenmeli ama anonymous function olduğu için
+    // bu ekran için önemli değil çünkü genelde kısa süre açık kalır
+    super.dispose();
   }
 
   Future<void> _fetchInitialData() async {

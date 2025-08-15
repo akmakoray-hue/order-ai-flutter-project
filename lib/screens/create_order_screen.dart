@@ -1,5 +1,7 @@
 // lib/screens/create_order_screen.dart
 
+import '../services/notification_center.dart';
+import '../services/refresh_manager.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -47,6 +49,21 @@ class _CreateOrderScreenState extends State<CreateOrderScreen> with RouteAware {
     newOrderNotificationDataNotifier.addListener(_handleShowNotificationDialogIfNeeded);
     orderStatusUpdateNotifier.addListener(_handleSilentOrderUpdates);
     debugPrint('CreateOrderScreen: Notifier listenerları eklendi.');
+
+    // 🆕 NotificationCenter listener'ları ekle
+    NotificationCenter.instance.addObserver('refresh_all_screens', (data) {
+      debugPrint('[CreateOrderScreen] 📡 Global refresh received: ${data['event_type']}');
+      if (mounted) {
+        _controller?.refreshData();
+      }
+    });
+
+    NotificationCenter.instance.addObserver('screen_became_active', (data) {
+      debugPrint('[CreateOrderScreen] 📱 Screen became active notification received');
+      if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+        _controller?.refreshData();
+      }
+    });
   }
 
   @override
